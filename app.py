@@ -1,174 +1,138 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import datetime
 import yfinance as yf
 import plotly.graph_objects as go
-from data import add_indicators, save_user_prediction
-from model import train_on_user_data
-import pandas_datareader.data as web
+from sklearn.linear_model import LogisticRegression
 
-st.set_page_config(page_title="Human-Based Stock AI + Macro Dashboard")
+# ------------------------------
+# Page setup
+# ------------------------------
+st.set_page_config(page_title="Human-Based Stock AI")
 st.title("🧠 Human-Trained Stock Predictor")
 st.caption("AI trained only on YOUR predictions and notes")
 
-# --- Sidebar Tabs ---
-st.sidebar.title("Navigation")
-page = st.sidebar.radio("Select Page", ["Stock Predictor", "Macro Dashboard"])
+# ------------------------------
+# Sidebar: Stock Ticker & Range
+# ------------------------------
+ticker = st.sidebar.text_input("Stock Ticker", "AAPL")
+range_option = st.sidebar.selectbox("Select Time Range", ["Yesterday", "Today", "1 Week", "1 Month", "1 Year"])
 
-# -------------------
-# --- STOCK PAGE ----
-# -------------------
-if page == "Stock Predictor":
-    ticker = st.sidebar.text_input("Stock Ticker", "AAPL")
+# ------------------------------
+# Determine interval & period
+# ------------------------------
+now = datetime.datetime.now()
+if range_option == "Today":
+    interval = "1h"
+    start = now.replace(hour=0, minute=0)
+    end = now
+elif range_option == "Yesterday":
+    interval = "5m"
+    yesterday = now - datetime.timedelta(days=1)
+    start = yesterday.replace(hour=9, minute=30)
+    end = yesterday.replace(hour=16, minute=0)
+elif range_option == "1 Week":
+    interval = "1h"
+    start = now - datetime.timedelta(days=7)
+    end = now
+elif range_option == "1 Month":
+    interval = "1d"
+    start = now - datetime.timedelta(days=30)
+    end = now
+else:  # 1 Year
+    interval = "1d"
+    start = now - datetime.timedelta(days=365)
+    end = now
 
-    # Fetch stock data (daily only)
-    df = yf.download(ticker, period="1y", interval="1d")
-    if df.empty:
-        st.error("No stock data available.")
-        st.stop()
+# ------------------------------
+# Fetch stock data using yfinance
+# ------------------------------
+df = yf.download(ticker, start=start, end=end, interval=interval)
+if df.empty:
+    st.error("No data available for this range.")
+    st.stop()
 
-    df.index = pd.to_datetime(df.index)
+df.index = pd.to_datetime(df.index)
 
-    # Flatten multi-index columns if needed
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = ['_'.join([str(i) for i in col]).strip('_') for col in df.columns]
+# ------------------------------
+# Add simple moving averages
+# ------------------------------
+df['MA10'] = df['Close'].rolling(10).mean()
+df['MA50'] = df['Close'].rolling(50).mean()
+df['Return'] = df['Close'].pct_change()
 
-    # Ensure Close exists
-    if "Close" not in df.columns:
-        close_candidates = [c for c in df.columns if "Close" in c]
-        if not close_candidates:
-            st.error("No Close column found.")
-            st.stop()
-        df["Close"] = df[close_candidates[0]]
+# ------------------------------
+# Tabs for visualization
+# ------------------------------
+tab1, tab2, tab3, tab4 = st.tabs(["Price Chart","Short-Term Trend","Medium-Term Trend","Macro Info"])
 
-    # Add indicators
-    df = add_indicators(df)
+def plot_chart(y, title, color, name):
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=df.index,
+        y=y,
+        mode='lines',
+        line=dict(color=color, width=2),
+        name=name,
+        hovertemplate=f'<b>{name}: $%{{y:.2f}}</b><br>Date: %{{x|%Y-%m-%d %H:%M}}</extra>'
+    ))
+    fig.update_layout(
+        title=title,
+        template="plotly_dark",
+        plot_bgcolor="black",
+        paper_bgcolor="black",
+        font=dict(color="white"),
+        xaxis=dict(showgrid=False, showline=True, linecolor='gray', zeroline=False),
+        yaxis=dict(showgrid=False, showline=True, linecolor='gray', zeroline=False)
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
-    # Ensure numeric safely
-    for col in ["Close","MA10","MA50","Return"]:
-        if col in df.columns:
-            if isinstance(df[col], pd.DataFrame):
-                df[col] = df[col].iloc[:,0]
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-        else:
-            st.error(f"Missing column: {col}")
-            st.stop()
+with tab1:
+    plot_chart(df["Close"], f"{ticker} Price","white","Price")
+with tab2:
+    plot_chart(df["MA10"], f"{ticker} Short-Term Trend","orange","MA10")
+with tab3:
+    plot_chart(df["MA50"], f"{ticker} Medium-Term Trend","green","MA50")
+with tab4:
+    st.write("📊 Macro Info: Example US Economic Variables")
+    st.write("- Inflation, Interest Rates, GDP growth")
+    st.info("This can later be updated with live macro data from a reliable source.")
 
-    df_plot = df[["Close","MA10","MA50","Return"]].fillna(method="bfill")
+# ------------------------------
+# User prediction section
+# ------------------------------
+st.subheader("Your Prediction")
+user_choice = st.radio("What do you think the next move will be?", ["Up 📈","Down 📉"])
+notes = st.text_area("Why are you making this prediction?", placeholder="Example: price bouncing, volume increasing...")
 
-    # Tabs for charts
-    tab1, tab2, tab3 = st.tabs(["Price Chart","Short-Term Trend","Medium-Term Trend"])
+if st.button("Save My Prediction"):
+    if "predictions" not in st.session_state:
+        st.session_state.predictions = []
+    st.session_state.predictions.append({
+        "MA10": df['MA10'].iloc[-1],
+        "MA50": df['MA50'].iloc[-1],
+        "Return": df['Return'].iloc[-1],
+        "Prediction": 1 if "Up" in user_choice else 0,
+        "Notes": notes
+    })
+    st.success("Prediction saved!")
 
-    def plot_chart(y, title, color, name):
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=df_plot.index,
-            y=y,
-            mode='lines',
-            line=dict(color=color, width=2),
-            name=name
-        ))
-        fig.update_layout(
-            title=title,
-            template="plotly_dark",
-            plot_bgcolor="black",
-            paper_bgcolor="black",
-            font=dict(color="white"),
-            xaxis=dict(showgrid=False, showline=True, linecolor='gray', zeroline=False),
-            yaxis=dict(showgrid=False, showline=True, linecolor='gray', zeroline=False)
-        )
-        st.plotly_chart(fig, use_container_width=True)
+# ------------------------------
+# AI Prediction based on your past inputs
+# ------------------------------
+st.divider()
+st.subheader("AI Learning From You")
 
-    with tab1:
-        plot_chart(df_plot["Close"], f"{ticker} Price","white","Price")
-        st.info("Price Chart: Shows daily closing prices over the last year.")
-
-    with tab2:
-        plot_chart(df_plot["MA10"], f"{ticker} Short-Term Trend","orange","MA10")
-        st.info("Short-Term Trend: 10-day moving average shows recent price momentum.")
-
-    with tab3:
-        plot_chart(df_plot["MA50"], f"{ticker} Medium-Term Trend","green","MA50")
-        st.info("Medium-Term Trend: 50-day moving average shows longer-term trend direction.")
-
-    # --- User prediction ---
-    st.subheader("Your Prediction")
-    user_choice = st.radio("What do you think the next move will be?", ["Up 📈","Down 📉"])
-    notes = st.text_area("Why are you making this prediction?", placeholder="Example: price bouncing, volume increasing...")
-
-    if st.button("Save My Prediction"):
-        latest = df.iloc[-1]
-        row = pd.DataFrame([{
-            "Date": latest.name,
-            "Ticker": ticker,
-            "MA10": latest["MA10"],
-            "MA50": latest["MA50"],
-            "Return": latest["Return"],
-            "UserPrediction": 1 if "Up" in user_choice else 0,
-            "Notes": notes
-        }])
-        save_user_prediction(row)
-        st.success("Prediction saved!")
-
-    # --- AI prediction ---
-    st.divider()
-    st.subheader("AI Learning From You")
-    model, accuracy = train_on_user_data()
-    if model is None:
-        st.info("Add at least 10 predictions before the AI activates.")
-    else:
-        latest_features = df.iloc[-1][["MA10","MA50","Return"]]
-        ai_prediction = model.predict([latest_features])[0]
-        st.write("AI prediction based on YOUR past behavior:")
-        st.write("📈 UP" if ai_prediction == 1 else "📉 DOWN")
-        st.write(f"Accuracy: {accuracy:.2%}")
-
-        # Input for asking AI
-        st.subheader("Ask AI for a prediction")
-        if st.button("What will the AI predict next?"):
-            st.write("AI predicts:")
-            st.write("📈 UP" if ai_prediction == 1 else "📉 DOWN")
-
-# -------------------
-# --- MACRO PAGE ----
-# -------------------
+if "predictions" in st.session_state and len(st.session_state.predictions) >= 3:
+    data = pd.DataFrame(st.session_state.predictions)
+    X = data[['MA10','MA50','Return']].fillna(0)
+    y = data['Prediction']
+    model = LogisticRegression()
+    model.fit(X, y)
+    latest_features = np.array([[df['MA10'].iloc[-1], df['MA50'].iloc[-1], df['Return'].iloc[-1]]])
+    ai_prediction = model.predict(latest_features)[0]
+    st.write("AI prediction based on YOUR past behavior:")
+    st.write("📈 UP" if ai_prediction == 1 else "📉 DOWN")
 else:
-    st.subheader("U.S. Macroeconomic Dashboard")
-    macro_choice = st.radio("Select Variable", ["Inflation (CPI)", "Unemployment Rate", "GDP", "Interest Rate"])
-
-    start = datetime.datetime(2015, 1, 1)
-    end = datetime.datetime.today()
-
-    try:
-        if macro_choice == "Inflation (CPI)":
-            df_macro = web.DataReader("CPIAUCSL", "fred", start, end)
-            title = "U.S. Consumer Price Index (CPI)"
-        elif macro_choice == "Unemployment Rate":
-            df_macro = web.DataReader("UNRATE", "fred", start, end)
-            title = "U.S. Unemployment Rate"
-        elif macro_choice == "GDP":
-            df_macro = web.DataReader("GDP", "fred", start, end)
-            title = "U.S. GDP"
-        elif macro_choice == "Interest Rate":
-            df_macro = web.DataReader("FEDFUNDS", "fred", start, end)
-            title = "U.S. Federal Funds Rate"
-
-        fig_macro = go.Figure()
-        fig_macro.add_trace(go.Scatter(
-            x=df_macro.index,
-            y=df_macro[df_macro.columns[0]],
-            mode='lines',
-            line=dict(color='cyan', width=2),
-            name=macro_choice
-        ))
-        fig_macro.update_layout(
-            title=title,
-            template="plotly_dark",
-            plot_bgcolor="black",
-            paper_bgcolor="black",
-            font=dict(color="white")
-        )
-
-        st.plotly_chart(fig_macro, use_container_width=True)
-    except Exception as e:
-        st.error(f"Could not load data for {macro_choice}. Error: {e}")
+    st.info("Add at least 3 predictions before the AI activates.")
